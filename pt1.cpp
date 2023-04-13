@@ -1,131 +1,140 @@
-#include <iostream>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
-#include <vector>
 #include <unordered_set>
+#include <vector>
+#include <iostream>
+#include <semaphore.h>
 #include <random>
 
-using namespace std;
+const int NUM_SERVANTS = 4;
+const int NUM_GIFTS = 500000;
 
-const int kNumServants = 4;
-const int kNumPresents = 500000;
+struct Gift {
+    int tag;
+    Gift* next;
 
-// Class for a present
-class Present {
-public:
-    Present(int tag) : tag_(tag), next_(nullptr) {}
-
-    int tag_;
-    Present* next_;
+    Gift(int tag) : tag(tag), next(nullptr) {}
 };
 
-// Class for a linked-list of presents
-class PresentList {
+class ConcurrentLinkedList {
 public:
-    PresentList() : head_(nullptr), tail_(nullptr) {}
-
-    void AddPresent(Present* present) {
-        // Empty list
-        if (!head_) {
-            head_ = present;
-            tail_ = present;
-        }
-        // Add to the beginning
-        else if (head_->tag_ > present->tag_) {
-            present->next_ = head_;
-            head_ = present;
-        }
-        // Add to the end
-        else if (tail_->tag_ < present->tag_) {
-            tail_->next_ = present;
-            tail_ = present;
-        }
-        // Add in the middle
-        else {
-            Present* prev = head_;
-            while (prev->next_->tag_ < present->tag_) {
-                prev = prev->next_;
-            }
-            present->next_ = prev->next_;
-            prev->next_ = present;
-        }
+    ConcurrentLinkedList() : head(nullptr), tail(nullptr), nextTag(0) {
+    sem_init(&semaphore, 0, 0);    
     }
 
-    void RemovePresent(int tag) {
-        Present* curr = head_;
-        Present* prev = nullptr;
 
-        while (curr && curr->tag_ != tag) {
-            prev = curr;
-            curr = curr->next_;
-        }
-
-        // If not found
-        if (!curr) {
+    void addGift(Gift* gift) {
+        std::unique_lock<std::mutex> lock(m);
+        if (giftSet.find(gift->tag) != giftSet.end()) {
+            std::cout << "Gift with tag " << gift->tag << " is already in the list." << std::endl;
             return;
         }
+        if (!tail) {
+            head = gift;
+            tail = gift;
+        } else {
+            tail->next = gift;
+            tail = gift;
+        }
+        giftSet.insert(gift->tag);
+        std::cout << "Added gift with tag " << gift->tag << " to the list." << std::endl;
+        sem_post(&semaphore);
+    }
 
-        // Remove from the beginning
-        if (!prev) {
-            head_ = curr->next_;
-            // If the list is now empty
-            if (!head_) {
-                tail_ = nullptr;
+    void removeGift(int tag) {
+        std::unique_lock<std::mutex> lock(m);
+        cv.wait(lock, [this]() { return head != nullptr; }); // wait until there is a gift to remove
+        Gift* prev = nullptr;
+        for (Gift* curr = head; curr; prev = curr, curr = curr->next) {
+            if (curr->tag == tag) {
+                if (prev) {
+                    prev->next = curr->next;
+                } else {
+                    head = curr->next;
+                }
+                if (!curr->next) {
+                    tail = prev;
+                }
+                delete curr;
+                giftSet.erase(tag);
+                std::cout << "Removed gift with tag " << tag << std::endl;
+                return;
             }
         }
-        // Remove from the end
-        else if (curr == tail_) {
-            tail_ = prev;
-            prev->next_ = nullptr;
-        }
-        // Remove from the middle
-        else {
-            prev->next_ = curr->next_;
-        }
-
-        delete curr;
+        std::cout << "Gift with tag " << tag << " not found in the list." << std::endl;
     }
 
-    bool HasPresent(int tag) {
-        Present* curr = head_;
-        while (curr && curr->tag_ < tag) {
-            curr = curr->next_;
-        }
-        return curr && curr->tag_ == tag;
+    bool containsGift(int tag) {
+        std::unique_lock<std::mutex> lock(m);
+        bool contains = giftSet.find(tag) != giftSet.end();
+        std::cout << "Checked if gift with tag " << tag << " is in the list. Result: " << contains << std::endl;
+        return contains;
     }
 
-    Present* head_;
-    Present* tail_;
+void thankYouCards(int servantId) {
+        while (true) {
+            sem_wait(&semaphore);
+            std::unique_lock<std::mutex> lock(m);
+            int action = rand() % 3;
+            if (action == 0) {
+                Gift* gift = new Gift(++nextTag);
+                addGift(gift);
+            } else if (action == 1) {
+                if (!giftSet.empty()) {
+                    int tag = *giftSet.begin();
+                    removeGift(tag);
+                    std::cout << "Servant " << servantId << " removed gift with tag " << tag << std::endl;
+                    numCards[servantId]++;
+                    lock.unlock(); // unlock the mutex before printing the message
+                    std::cout << "Servant " << servantId << " wrote a thank-you card." << std::endl;
+                }
+            } else {
+                if (nextTag > 0) { // don't check for a gift with tag 0
+                    int tag = rand() % nextTag + 1;
+                    bool contains = containsGift(tag);
+                    std::cout << "Servant " << servantId << " checked if gift with tag " << tag << " is in the list. Result: " << contains << std::endl;
+                }
+            }
+            if (giftSet.empty()) {
+                break;
+            }
+        }
+    }
+    
+    int* getNumCards() {
+        return numCards;
+    }
+    int nextTag = 0;
+    Gift* head;
+    Gift* tail;
+    std::unordered_set<int> giftSet;
+    std::mutex m;
+    std::condition_variable cv;
+    sem_t semaphore;
+    int numCards[NUM_SERVANTS] = {0};
+    int numChecks[NUM_SERVANTS] = {0};
 };
 
-// Shared data between the threads
-struct SharedData {
-    vector<int> presents;
-    unordered_set<int> present_tags;
-    PresentList present_list;
-    mutex presents_mutex;
-    mutex present_tags_mutex;
-    mutex present_list_mutex;
-    condition_variable presents_cv;
-    condition_variable present_tags_cv;
-    condition_variable present_list_cv;
-    int num_thank_you_notes = 0;
-    mutex num_thank_you_notes_mutex;
-};
+int main() {
+    ConcurrentLinkedList list;
+    std::vector<std::thread> threads;
 
-// Function for the thread that adds presents to the linked-list
-void AddPresentsThread(SharedData* shared_data, int servant_id) {
-    random_device rd;
-    mt19937 gen(rd());
-    uniform_int_distribution<> distrib(1, kNumPresents);
+    for (int i = 0; i < NUM_SERVANTS; i++) {
+        threads.emplace_back(&ConcurrentLinkedList::thankYouCards, &list, i);
+    }
 
-    while (true) {
-        // Wait until there is at least 1 present in the bag
-        unique_lock<mutex> lock(shared_data->presents_mutex);
-        shared_data->presents_cv.wait(lock, [&shared_data]{ return !shared_data->presents.empty(); });
+    for (int i = 1; i <= NUM_GIFTS; i++) {
+        list.addGift(new Gift(i));
+    }
 
-        // Get the present from the bag
-        int present = shared_data->presents.back();
-        shared_data->presents.pop_back();
-        
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    int* numCards = list.getNumCards();
+    for (int i = 0; i < NUM_SERVANTS; i++) {
+        std::cout << "Servant " << i << " wrote " << numCards[i] << " thank you cards." << std::endl;
+    }
+
+    return 0;
+}
